@@ -14,8 +14,8 @@ from llm_router.models import QueryProfile
 class MockOpenAIService:
     """Offline HTTP backend for the classifier and provider OpenAI clients."""
 
-    def __init__(self, classification_cases: dict[str, QueryProfile]) -> None:
-        self._classification_cases = classification_cases
+    def __init__(self, classification_profile: QueryProfile) -> None:
+        self._classification_profile = classification_profile
         self.calls: list[dict[str, Any]] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -25,11 +25,7 @@ class MockOpenAIService:
         self.calls.append({"model": model, "prompt": prompt})
 
         if model == DEFAULT_CLASSIFIER_MODEL:
-            query = self._extract_query(prompt)
-            profile = self._classification_cases.get(query)
-            if profile is None:
-                raise AssertionError(f"No mock classification fixture for: {query!r}")
-            content = profile.model_dump_json()
+            content = self._classification_profile.model_dump_json()
         else:
             content = json.dumps(
                 {"answer": "Mock provider response.", "model": model}
@@ -71,10 +67,3 @@ class MockOpenAIService:
 
         prompt = payload.get("prompt", "")
         return prompt if isinstance(prompt, str) else ""
-
-    @staticmethod
-    def _extract_query(prompt: str) -> str:
-        marker = "User request:\n"
-        if marker not in prompt:
-            raise AssertionError("Could not find classifier request marker.")
-        return prompt.split(marker, 1)[1].strip()
