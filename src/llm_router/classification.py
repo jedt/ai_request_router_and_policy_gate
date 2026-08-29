@@ -51,7 +51,7 @@ class CompletionClient(Protocol):
 class LLMApprovalClassifier:
     """Extract and validate normalized semantic approval-risk signals."""
 
-    def __init__(self, llm: CompletionClient) -> None:
+    def __init__(self, llm: OpenAI) -> None:
         self._llm = llm
 
     def classify(self, query: str) -> ApprovalProfile:
