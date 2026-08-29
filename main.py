@@ -18,7 +18,7 @@ from llm_router.defaults import (
     FAILOVER_TEST_PROVIDERS,
 )
 from llm_router.factory import build_router
-from llm_router.models import ApprovalDecision, QueryProfile
+from llm_router.models import ApprovalDecision, ApprovalProfile, QueryProfile
 from llm_router.provider_engine import CompletionProvider
 from service.mock_api_service_provider import (
     MockAPIServiceProvider,
@@ -92,6 +92,26 @@ def select_test_case(test_case: int) -> tuple[str, QueryProfile]:
             raise ValueError(f"Unsupported test case: {test_case}")
 
 
+def select_approval_profile(test_case: int) -> ApprovalProfile:
+    if test_case == 5:
+        return ApprovalProfile(
+            personal_info_risk=0.0,
+            medical_records_risk=0.0,
+            cyber_exploits_risk=0.0,
+            illegal_acts_risk=0.70,
+            harmful_materials_risk=0.98,
+            uncertainty=0.02,
+        )
+    return ApprovalProfile(
+        personal_info_risk=0.0,
+        medical_records_risk=0.0,
+        cyber_exploits_risk=0.0,
+        illegal_acts_risk=0.0,
+        harmful_materials_risk=0.0,
+        uncertainty=0.0,
+    )
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
     "--test-case",
@@ -119,6 +139,7 @@ def main(test_case: int, logs: bool) -> None:
     )
     openai_service = MockOpenAIService(
         classification_profile,
+        approval_profile=select_approval_profile(test_case),
         failing_models=failing_models,
         failure="budget_exhausted",
     )
@@ -175,16 +196,16 @@ def main(test_case: int, logs: bool) -> None:
             str(response.metadata.get("approval_status", "unknown")),
         )
         table.add_row(
-            "Request type",
-            str(response.metadata.get("approval_request_type", "unknown")),
+            "Dominant risk",
+            str(response.metadata.get("approval_dominant_risk", "unknown")),
         )
         table.add_row(
-            "Estimated cost",
-            str(response.metadata.get("approval_estimated_cost", "unknown")),
+            "Approval score",
+            str(response.metadata.get("approval_score", "unknown")),
         )
         table.add_row(
-            "Cost threshold",
-            str(response.metadata.get("approval_cost_threshold", "unknown")),
+            "Decision action",
+            str(response.metadata.get("approval_action", "unknown")),
         )
         table.add_row(
             "Decision source",
@@ -217,18 +238,23 @@ def display_rejected_approval(
     table.add_row("Test case", str(test_case))
     table.add_row("User query", user_request)
     table.add_row("Approval status", decision.status)
-    table.add_row("Request type", decision.request_type or "unknown")
+    table.add_row("Decision action", decision.action)
+    table.add_row("Dominant risk", decision.dominant_risk or "unknown")
     table.add_row(
-        "Estimated cost",
-        f"{decision.estimated_cost:.2f}"
-        if decision.estimated_cost is not None
+        "Approval score",
+        f"{decision.score:.2f}" if decision.score is not None else "unknown",
+    )
+    table.add_row(
+        "Review threshold",
+        f"{decision.review_threshold:.2f}"
+        if decision.review_threshold is not None
         else "unknown",
     )
     table.add_row(
-        "Cost threshold",
-        f"{decision.cost_threshold:.2f}"
-        if decision.cost_threshold is not None
-        else "none",
+        "Reject threshold",
+        f"{decision.reject_threshold:.2f}"
+        if decision.reject_threshold is not None
+        else "unknown",
     )
     table.add_row("Decision source", decision.decided_by or "unknown")
     table.add_row("Reason", decision.reason)

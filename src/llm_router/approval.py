@@ -7,28 +7,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from llm_router.classification import CompletionClient, RequestTypeClassifier
-from llm_router.models import (
-    ApprovalDecision,
-    ApprovalPolicy,
-    RequestClassification,
-)
+from llm_router.approval_scoring import decide_approval
+from llm_router.classification import ApprovalClassifier, CompletionClient
+from llm_router.models import ApprovalDecision, ApprovalPolicy
 from utils.scribe import AuditReceipt, Scribe
 
 
-DEFAULT_REJECTED_REQUEST_TYPES = frozenset(
-    {
-        "personal_info",
-        "medical_records",
-        "cyber_exploits",
-        "illegal_acts",
-        "harmful_materials",
-    }
-)
-
-
 class ApprovalRejectedError(RuntimeError):
-    """Raised when policy or the mock reviewer rejects a request."""
+    """Raised when approval policy or reviewer rejects a request."""
 
     def __init__(self, decision: ApprovalDecision) -> None:
         super().__init__(decision.reason)
@@ -43,7 +29,7 @@ class ApprovalEvaluationError(RuntimeError):
         self.decision = decision
 
 
-class _MockApprovalResponse(BaseModel):
+class _ApprovalReviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     status: Literal["approved", "rejected"]
@@ -57,8 +43,8 @@ class ApprovedRequest:
     decision_receipt: AuditReceipt
 
 
-def load_approval_policy(path: str | Path) -> ApprovalPolicy:
-    """Load strict approval rules from a JSON file."""
+def load_policy_json(path: str | Path) -> ApprovalPolicy:
+    """Load a strict version 2 approval scoring policy from JSON."""
 
     policy_path = Path(path)
     try:
@@ -71,76 +57,44 @@ def load_approval_policy(path: str | Path) -> ApprovalPolicy:
     except json.JSONDecodeError as exc:
         raise ValueError(f"Approval policy contains invalid JSON: {policy_path}") from exc
 
+    if not isinstance(payload, dict) or payload.get("version") != 2:
+        raise ValueError("Approval policy version 2 is required; version 1 is unsupported.")
+
     try:
         return ApprovalPolicy.model_validate(payload)
     except ValidationError as exc:
         raise ValueError(f"Approval policy is invalid: {policy_path}") from exc
 
 
-class MockRequestTypeLLM:
-    """Deterministic in-process request classifier with no external calls."""
-
-    _KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-        ("medical_records", ("medical record", "patient record", "health record")),
-        ("personal_info", ("personal info", "social security", "home address")),
-        ("cyber_exploits", ("cyber exploit", "zero-day", "malware", "hack into")),
-        ("illegal_acts", ("illegal act", "commit a crime", "steal", "fraud")),
-        ("harmful_materials", ("harmful material", "build a bomb", "make poison")),
-    )
-
-    def __init__(self, request_types: tuple[str, ...]) -> None:
-        self._request_types = frozenset(request_types)
-        self.calls: list[str] = []
-
-    def complete(self, prompt: str, **_: object) -> str:
-        self.calls.append(prompt)
-        query = prompt.rsplit("User request:\n", maxsplit=1)[-1].lower()
-        request_type = "general" if "general" in self._request_types else "unknown"
-        estimated_cost = 0.1
-        for candidate, keywords in self._KEYWORDS:
-            if any(keyword in query for keyword in keywords):
-                request_type = (
-                    candidate if candidate in self._request_types else "unknown"
-                )
-                estimated_cost = 0.8
-                break
-        return json.dumps(
-            {
-                "request_type": request_type,
-                "estimated_cost": estimated_cost,
-            }
-        )
-
-
 class MockApprovalLLM:
-    """Deterministic in-process approval reviewer with no external calls."""
+    """Deterministic score-based reviewer used by the offline demo and tests."""
 
-    def __init__(
-        self,
-        rejected_request_types: frozenset[str] = DEFAULT_REJECTED_REQUEST_TYPES,
-    ) -> None:
-        self._rejected_request_types = rejected_request_types
+    def __init__(self, reject_at: float = 0.55) -> None:
+        if not 0.0 <= reject_at <= 1.0:
+            raise ValueError("reject_at must be between 0 and 1.")
+        self._reject_at = reject_at
         self.calls: list[str] = []
 
     def complete(self, prompt: str, **_: object) -> str:
         self.calls.append(prompt)
         context = json.loads(prompt.rsplit("Approval context:\n", maxsplit=1)[-1])
-        request_type = str(context["request_type"])
-        rejected = request_type in self._rejected_request_types
+        score = float(context["score"])
+        dominant_risk = str(context["dominant_risk"])
+        rejected = score >= self._reject_at
         return json.dumps(
             {
                 "status": "rejected" if rejected else "approved",
                 "reason": (
-                    f"Mock reviewer rejected {request_type}."
+                    f"Mock reviewer rejected score {score:.3f} for {dominant_risk}."
                     if rejected
-                    else f"Mock reviewer approved {request_type}."
+                    else f"Mock reviewer approved score {score:.3f} for {dominant_risk}."
                 ),
             }
         )
 
 
-class MockApprovalEvaluator:
-    """Validate the deterministic mock reviewer's structured decision."""
+class ApprovalEvaluator:
+    """Request and validate a review-band approval decision."""
 
     def __init__(self, llm: CompletionClient) -> None:
         self._llm = llm
@@ -148,15 +102,19 @@ class MockApprovalEvaluator:
     def evaluate(
         self,
         query: str,
-        classification: RequestClassification,
+        decision: ApprovalDecision,
         policy: ApprovalPolicy,
-        threshold: float,
-    ) -> _MockApprovalResponse:
+    ) -> _ApprovalReviewResponse:
         context = {
             "query": query,
-            "request_type": classification.request_type,
-            "estimated_cost": classification.estimated_cost,
-            "cost_threshold": threshold,
+            "profile": decision.profile.model_dump(mode="json")
+            if decision.profile is not None
+            else None,
+            "risk_scores": decision.risk_scores,
+            "dominant_risk": decision.dominant_risk,
+            "score": decision.score,
+            "review_threshold": decision.review_threshold,
+            "reject_threshold": decision.reject_threshold,
             "approval_rubric": policy.approval_rubric,
         }
         prompt = (
@@ -168,23 +126,23 @@ class MockApprovalEvaluator:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"Mock approval LLM returned invalid JSON: {raw!r}") from exc
+            raise ValueError(f"Approval reviewer returned invalid JSON: {raw!r}") from exc
         try:
-            return _MockApprovalResponse.model_validate(payload)
+            return _ApprovalReviewResponse.model_validate(payload)
         except ValidationError as exc:
             raise ValueError(
-                f"Mock approval LLM returned invalid decision: {payload!r}"
+                f"Approval reviewer returned invalid decision: {payload!r}"
             ) from exc
 
 
 class ApprovalGate:
-    """Audit and enforce approval before semantic routing begins."""
+    """Profile, score, audit, and enforce approval before routing begins."""
 
     def __init__(
         self,
         policy: ApprovalPolicy,
-        classifier: RequestTypeClassifier,
-        evaluator: MockApprovalEvaluator,
+        classifier: ApprovalClassifier,
+        evaluator: ApprovalEvaluator,
         scribe: Scribe,
     ) -> None:
         self.policy = policy
@@ -197,6 +155,11 @@ class ApprovalGate:
         pending = ApprovalDecision(
             decision_id=decision_id,
             status="pending",
+            action="pending",
+            review_threshold=self.policy.review_threshold,
+            reject_threshold=self.policy.reject_threshold,
+            policy_version=self.policy.version,
+            algorithm_version=self.policy.algorithm_version,
             reason="Awaiting approval evaluation.",
         )
         pending_receipt = self._scribe.append(
@@ -207,40 +170,16 @@ class ApprovalGate:
         )
 
         try:
-            classification = self._classifier.classify(query)
-            rule = self.policy.rules.get(classification.request_type)
-            if rule is None:
-                decision = self._decision(
-                    pending,
-                    classification,
-                    threshold=None,
-                    status="rejected",
-                    reason="Request type is not allowed by the approval policy.",
-                    decided_by="policy",
-                )
-            elif classification.estimated_cost <= rule.cost_threshold:
-                decision = self._decision(
-                    pending,
-                    classification,
-                    threshold=rule.cost_threshold,
-                    status="approved",
-                    reason="Estimated cost is at or below the approval threshold.",
-                    decided_by="policy",
-                )
-            else:
-                reviewed = self._evaluator.evaluate(
-                    query,
-                    classification,
-                    self.policy,
-                    rule.cost_threshold,
-                )
-                decision = self._decision(
-                    pending,
-                    classification,
-                    threshold=rule.cost_threshold,
-                    status=reviewed.status,
-                    reason=reviewed.reason,
-                    decided_by="mock_llm",
+            profile = self._classifier.classify(query)
+            decision = decide_approval(profile, self.policy, decision_id)
+            if decision.action == "review":
+                reviewed = self._evaluator.evaluate(query, decision, self.policy)
+                decision = decision.model_copy(
+                    update={
+                        "status": reviewed.status,
+                        "reason": reviewed.reason,
+                        "decided_by": "reviewer",
+                    }
                 )
         except Exception as exc:
             self._scribe.append(
@@ -264,23 +203,3 @@ class ApprovalGate:
         if decision.status == "rejected":
             raise ApprovalRejectedError(decision)
         return ApprovedRequest(decision, pending_receipt, decision_receipt)
-
-    @staticmethod
-    def _decision(
-        pending: ApprovalDecision,
-        classification: RequestClassification,
-        *,
-        threshold: float | None,
-        status: Literal["approved", "rejected"],
-        reason: str,
-        decided_by: Literal["policy", "mock_llm"],
-    ) -> ApprovalDecision:
-        return ApprovalDecision(
-            decision_id=pending.decision_id,
-            status=status,
-            request_type=classification.request_type,
-            estimated_cost=classification.estimated_cost,
-            cost_threshold=threshold,
-            reason=reason,
-            decided_by=decided_by,
-        )

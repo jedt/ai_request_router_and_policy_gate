@@ -6,7 +6,7 @@ from typing import Protocol
 from llama_index.llms.openai import OpenAI
 from pydantic import ValidationError
 
-from llm_router.models import QueryProfile, RequestClassification
+from llm_router.models import ApprovalProfile, QueryProfile
 
 
 CLASSIFIER_SYSTEM_PROMPT = """You are a semantic requirement analyzer.
@@ -36,31 +36,35 @@ class QueryClassifier(Protocol):
     def classify(self, query: str) -> QueryProfile: ...
 
 
+class ApprovalClassifier(Protocol):
+    """Classifies a request into normalized approval-risk signals."""
+
+    def classify(self, query: str) -> ApprovalProfile: ...
+
+
 class CompletionClient(Protocol):
-    """Small completion boundary implemented by deterministic local mocks."""
+    """Small completion boundary for injected model adapters and test fakes."""
 
     def complete(self, prompt: str, **kwargs: object) -> object: ...
 
 
-class RequestTypeClassifier:
-    """Validate mock-generated request type and normalized cost JSON."""
+class LLMApprovalClassifier:
+    """Extract and validate normalized semantic approval-risk signals."""
 
-    def __init__(
-        self,
-        llm: CompletionClient,
-        request_types: tuple[str, ...],
-    ) -> None:
-        if not request_types:
-            raise ValueError("request_types must not be empty.")
+    def __init__(self, llm: CompletionClient) -> None:
         self._llm = llm
-        self._request_types = request_types
 
-    def classify(self, query: str) -> RequestClassification:
-        allowed = ", ".join((*self._request_types, "unknown"))
+    def classify(self, query: str) -> ApprovalProfile:
         prompt = (
-            "Classify the request without answering it. Return ONLY JSON with "
-            'keys "request_type" and "estimated_cost". The request type must '
-            f"be one of: {allowed}. estimated_cost must be between 0 and 1."
+            "Score the request without answering it. Return ONLY JSON with "
+            'keys "personal_info_risk", "medical_records_risk", '
+            '"cyber_exploits_risk", "illegal_acts_risk", '
+            '"harmful_materials_risk", and "uncertainty". Every value must be '
+            "between 0 and 1. Score whether the request would enable harmful "
+            "or unauthorized action, not whether it merely mentions a topic. "
+            "Account for intent, actionability, negation, quotation, benign "
+            "educational context, and authorization. uncertainty measures how "
+            "uncertain these risk scores are."
             f"\n\nUser request:\n{query}"
         )
         raw = str(self._llm.complete(prompt, temperature=0)).strip()
@@ -68,23 +72,15 @@ class RequestTypeClassifier:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError(
-                f"Request type classifier returned invalid JSON: {raw!r}"
+                f"Approval classifier returned invalid JSON: {raw!r}"
             ) from exc
 
         try:
-            classification = RequestClassification.model_validate(payload)
+            return ApprovalProfile.model_validate(payload)
         except ValidationError as exc:
             raise ValueError(
-                "Request type classifier returned invalid classification: "
-                f"{payload!r}"
+                f"Approval classifier returned invalid ApprovalProfile: {payload!r}"
             ) from exc
-
-        if classification.request_type not in (*self._request_types, "unknown"):
-            raise ValueError(
-                "Request type classifier returned unsupported request type: "
-                f"{classification.request_type!r}"
-            )
-        return classification
 
 
 class LLMQueryClassifier:

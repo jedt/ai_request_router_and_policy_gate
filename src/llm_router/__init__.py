@@ -1,21 +1,28 @@
 """Semantic requirement-based LLM routing."""
 
 from llm_router.approval import (
+    ApprovalEvaluator,
     ApprovalEvaluationError,
     ApprovalGate,
     ApprovalRejectedError,
     MockApprovalLLM,
-    MockRequestTypeLLM,
-    load_approval_policy,
+    load_policy_json,
 )
-from llm_router.classification import RequestTypeClassifier
+from llm_router.approval_scoring import (
+    RiskScore,
+    decide_approval,
+    rank_risks,
+    risk_score,
+)
+from llm_router.classification import LLMApprovalClassifier
 from llm_router.models import (
     ApprovalDecision,
     ApprovalPolicy,
-    ApprovalRule,
+    ApprovalProfile,
+    ApprovalRisk,
+    ApprovalRiskWeights,
     ProviderProfile,
     QueryProfile,
-    RequestClassification,
     RoutingDecision,
     RoutingPolicy,
 )
@@ -24,17 +31,19 @@ from utils.scribe import AuditIntegrityError, AuditReceipt, AuditRecord, Scribe
 
 __all__ = [
     "ApprovalDecision",
+    "ApprovalEvaluator",
     "ApprovalEvaluationError",
     "ApprovalGate",
     "ApprovalPolicy",
+    "ApprovalProfile",
     "ApprovalRejectedError",
-    "ApprovalRule",
+    "ApprovalRisk",
+    "ApprovalRiskWeights",
+    "LLMApprovalClassifier",
     "MockApprovalLLM",
-    "MockRequestTypeLLM",
     "ProviderProfile",
     "QueryProfile",
-    "RequestClassification",
-    "RequestTypeClassifier",
+    "RiskScore",
     "RoutingDecision",
     "RoutingPolicy",
     "AuditIntegrityError",
@@ -42,7 +51,10 @@ __all__ = [
     "AuditRecord",
     "Scribe",
     "provider_score",
+    "risk_score",
+    "rank_risks",
+    "decide_approval",
     "rank_providers",
     "select_provider",
-    "load_approval_policy",
+    "load_policy_json",
 ]

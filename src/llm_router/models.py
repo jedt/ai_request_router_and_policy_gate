@@ -3,26 +3,55 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
-class ApprovalRule(BaseModel):
-    """Approval threshold for one configured request type."""
+ApprovalRisk = Literal[
+    "personal_info",
+    "medical_records",
+    "cyber_exploits",
+    "illegal_acts",
+    "harmful_materials",
+]
+
+
+class ApprovalProfile(BaseModel):
+    """Normalized semantic risk signals extracted from a request."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    cost_threshold: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    personal_info_risk: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    medical_records_risk: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    cyber_exploits_risk: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    illegal_acts_risk: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    harmful_materials_risk: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    uncertainty: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+
+
+class ApprovalRiskWeights(BaseModel):
+    """Severity weights applied to approval risk signals."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    personal_info: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    medical_records: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    cyber_exploits: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    illegal_acts: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    harmful_materials: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
 
 
 class ApprovalPolicy(BaseModel):
-    """Validated approval rules loaded from JSON configuration."""
+    """Versioned scoring policy for pre-routing approval."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    version: Literal[1]
+    version: Literal[2]
+    algorithm_version: Literal[1]
     approval_rubric: str = Field(min_length=1)
-    unmatched_action: Literal["reject"]
-    rules: dict[str, ApprovalRule] = Field(min_length=1)
+    review_threshold: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    reject_threshold: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    uncertainty_weight: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    risk_weights: ApprovalRiskWeights
 
     @field_validator("approval_rubric")
     @classmethod
@@ -31,45 +60,37 @@ class ApprovalPolicy(BaseModel):
             raise ValueError("approval_rubric must not be blank.")
         return value
 
-    @field_validator("rules")
+    @field_validator("reject_threshold")
     @classmethod
-    def validate_request_types(
-        cls, value: dict[str, ApprovalRule]
-    ) -> dict[str, ApprovalRule]:
-        for request_type in value:
-            if not request_type or not request_type.replace("_", "").isalnum():
-                raise ValueError(
-                    "Request type keys must contain only letters, numbers, "
-                    "and underscores."
-                )
+    def validate_threshold_order(cls, value: float, info: ValidationInfo) -> float:
+        review_threshold = info.data.get("review_threshold")
+        if review_threshold is not None and value <= review_threshold:
+            raise ValueError("reject_threshold must be greater than review_threshold.")
         return value
 
 
-class RequestClassification(BaseModel):
-    """Request type and normalized cost produced by the mock classifier."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    request_type: str = Field(min_length=1)
-    estimated_cost: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
-
-
 class ApprovalDecision(BaseModel):
-    """The current or final state of pre-routing approval."""
+    """The approval outcome and complete scoring inputs that produced it."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     decision_id: str = Field(min_length=1)
     status: Literal["pending", "approved", "rejected"]
-    request_type: str | None = None
-    estimated_cost: float | None = Field(
+    action: Literal["pending", "auto_approve", "review", "auto_reject"]
+    profile: ApprovalProfile | None = None
+    risk_scores: dict[ApprovalRisk, float] = Field(default_factory=dict)
+    dominant_risk: ApprovalRisk | None = None
+    score: float | None = Field(default=None, ge=0.0, le=1.0, allow_inf_nan=False)
+    review_threshold: float | None = Field(
         default=None, ge=0.0, le=1.0, allow_inf_nan=False
     )
-    cost_threshold: float | None = Field(
+    reject_threshold: float | None = Field(
         default=None, ge=0.0, le=1.0, allow_inf_nan=False
     )
+    policy_version: int | None = None
+    algorithm_version: int | None = None
     reason: str = Field(min_length=1)
-    decided_by: Literal["policy", "mock_llm"] | None = None
+    decided_by: Literal["policy", "reviewer"] | None = None
 
 
 class QueryProfile(BaseModel):

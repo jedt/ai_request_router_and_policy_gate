@@ -12,16 +12,16 @@ from llama_index.core.tools import QueryEngineTool
 from llama_index.llms.openai import OpenAI
 
 from llm_router.approval import (
+    ApprovalEvaluator,
     ApprovalGate,
-    MockApprovalEvaluator,
     MockApprovalLLM,
-    MockRequestTypeLLM,
-    load_approval_policy,
+    load_policy_json,
 )
 from llm_router.classification import (
+    ApprovalClassifier,
     CompletionClient,
+    LLMApprovalClassifier,
     LLMQueryClassifier,
-    RequestTypeClassifier,
 )
 from llm_router.defaults import (
     DEFAULT_APPROVAL_POLICY_PATH,
@@ -77,13 +77,21 @@ def build_router(
     sleep: Callable[[float], None] = time.sleep,
     async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     provider_llms: Mapping[str, CompletionProvider] | None = None,
-    request_type_llm: CompletionClient | None = None,
+    approval_classifier: ApprovalClassifier | None = None,
     approval_llm: CompletionClient | None = None,
+    approval_policy_path: str | Path = DEFAULT_APPROVAL_POLICY_PATH,
 ) -> tuple[BaseQueryEngine, LargeModelProviderSelector]:
     configured_llms = provider_llms or {}
-    approval_policy = load_approval_policy(DEFAULT_APPROVAL_POLICY_PATH)
-    request_types = tuple(approval_policy.rules)
-    configured_request_type_llm = request_type_llm or MockRequestTypeLLM(request_types)
+    approval_policy = load_policy_json(approval_policy_path)
+    classifier_llm = OpenAI(
+        model=DEFAULT_CLASSIFIER_MODEL,
+        api_key=api_key,
+        http_client=http_client,
+        max_retries=DEFAULT_MAX_RETRIES,
+    )
+    configured_approval_classifier = approval_classifier or LLMApprovalClassifier(
+        classifier_llm
+    )
     configured_approval_llm = approval_llm or MockApprovalLLM()
     scribe.append(
         "router_configured",
@@ -103,15 +111,11 @@ def build_router(
             "max_retries": DEFAULT_MAX_RETRIES,
             "backoff_base_seconds": DEFAULT_BACKOFF_BASE_SECONDS,
             "approval_policy": approval_policy.model_dump(mode="json"),
-            "request_type_adapter": _type_name(configured_request_type_llm),
-            "approval_adapter": _type_name(configured_approval_llm),
+            "approval_classifier_adapter": _type_name(
+                configured_approval_classifier
+            ),
+            "approval_reviewer_adapter": _type_name(configured_approval_llm),
         },
-    )
-    classifier_llm = OpenAI(
-        model=DEFAULT_CLASSIFIER_MODEL,
-        api_key=api_key,
-        http_client=http_client,
-        max_retries=DEFAULT_MAX_RETRIES,
     )
     classifier = LLMQueryClassifier(classifier_llm)
     selector = LargeModelProviderSelector(
@@ -122,11 +126,8 @@ def build_router(
     )
     approval_gate = ApprovalGate(
         policy=approval_policy,
-        classifier=RequestTypeClassifier(
-            configured_request_type_llm,
-            request_types,
-        ),
-        evaluator=MockApprovalEvaluator(configured_approval_llm),
+        classifier=configured_approval_classifier,
+        evaluator=ApprovalEvaluator(configured_approval_llm),
         scribe=scribe,
     )
     tools = build_query_engine_tools(

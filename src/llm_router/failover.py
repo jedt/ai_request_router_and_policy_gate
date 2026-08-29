@@ -383,9 +383,20 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         response.metadata["audit_decision_hash"] = decision_receipt.record_hash
         response.metadata["approval_decision_id"] = approval.decision.decision_id
         response.metadata["approval_status"] = approval.decision.status
-        response.metadata["approval_request_type"] = approval.decision.request_type
-        response.metadata["approval_estimated_cost"] = approval.decision.estimated_cost
-        response.metadata["approval_cost_threshold"] = approval.decision.cost_threshold
+        response.metadata["approval_action"] = approval.decision.action
+        response.metadata["approval_dominant_risk"] = approval.decision.dominant_risk
+        response.metadata["approval_score"] = approval.decision.score
+        response.metadata["approval_risk_scores"] = approval.decision.risk_scores
+        response.metadata["approval_review_threshold"] = (
+            approval.decision.review_threshold
+        )
+        response.metadata["approval_reject_threshold"] = (
+            approval.decision.reject_threshold
+        )
+        response.metadata["approval_policy_version"] = approval.decision.policy_version
+        response.metadata["approval_algorithm_version"] = (
+            approval.decision.algorithm_version
+        )
         response.metadata["approval_decided_by"] = approval.decision.decided_by
         response.metadata["approval_reason"] = approval.decision.reason
         response.metadata["approval_audit_event_id"] = approval.decision_receipt.event_id

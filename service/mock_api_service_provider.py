@@ -8,7 +8,7 @@ from typing import Any, Literal
 import httpx
 
 from llm_router.defaults import DEFAULT_CLASSIFIER_MODEL
-from llm_router.models import QueryProfile
+from llm_router.models import ApprovalProfile, QueryProfile
 
 
 ProviderFailure = Literal["offline", "budget_exhausted"]
@@ -20,10 +20,19 @@ class MockOpenAIService:
         self,
         classification_profile: QueryProfile,
         *,
+        approval_profile: ApprovalProfile | None = None,
         failing_models: frozenset[str] = frozenset(),
         failure: ProviderFailure = "offline",
     ) -> None:
         self._classification_profile = classification_profile
+        self._approval_profile = approval_profile or ApprovalProfile(
+            personal_info_risk=0.0,
+            medical_records_risk=0.0,
+            cyber_exploits_risk=0.0,
+            illegal_acts_risk=0.0,
+            harmful_materials_risk=0.0,
+            uncertainty=0.0,
+        )
         self._failing_models = failing_models
         self._failure = failure
         self.calls: list[dict[str, Any]] = []
@@ -35,7 +44,11 @@ class MockOpenAIService:
         self.calls.append({"model": model, "prompt": prompt})
 
         if model == DEFAULT_CLASSIFIER_MODEL:
-            content = self._classification_profile.model_dump_json()
+            content = (
+                self._approval_profile.model_dump_json()
+                if '"personal_info_risk"' in prompt
+                else self._classification_profile.model_dump_json()
+            )
         elif model in self._failing_models:
             return self._failure_response()
         else:
