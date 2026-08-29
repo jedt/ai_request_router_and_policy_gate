@@ -74,17 +74,14 @@ def build_router(
     policy: RoutingPolicy,
     api_key: str,
     scribe: Scribe,
-    classifier_model: str = DEFAULT_CLASSIFIER_MODEL,
-    backoff_base_seconds: float = DEFAULT_BACKOFF_BASE_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
     async_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     provider_llms: Mapping[str, CompletionProvider] | None = None,
-    approval_policy_path: str | Path = DEFAULT_APPROVAL_POLICY_PATH,
     request_type_llm: CompletionClient | None = None,
     approval_llm: CompletionClient | None = None,
 ) -> tuple[BaseQueryEngine, LargeModelProviderSelector]:
     configured_llms = provider_llms or {}
-    approval_policy = load_approval_policy(approval_policy_path)
+    approval_policy = load_approval_policy(DEFAULT_APPROVAL_POLICY_PATH)
     request_types = tuple(approval_policy.rules)
     configured_request_type_llm = request_type_llm or MockRequestTypeLLM(request_types)
     configured_approval_llm = approval_llm or MockApprovalLLM()
@@ -92,7 +89,7 @@ def build_router(
         "router_configured",
         request_id=scribe.new_id(),
         payload={
-            "classifier_model": classifier_model,
+            "classifier_model": DEFAULT_CLASSIFIER_MODEL,
             "providers": [
                 {
                     **asdict(provider),
@@ -104,14 +101,14 @@ def build_router(
             ],
             "policy": asdict(policy),
             "max_retries": DEFAULT_MAX_RETRIES,
-            "backoff_base_seconds": backoff_base_seconds,
+            "backoff_base_seconds": DEFAULT_BACKOFF_BASE_SECONDS,
             "approval_policy": approval_policy.model_dump(mode="json"),
             "request_type_adapter": _type_name(configured_request_type_llm),
             "approval_adapter": _type_name(configured_approval_llm),
         },
     )
     classifier_llm = OpenAI(
-        model=classifier_model,
+        model=DEFAULT_CLASSIFIER_MODEL,
         api_key=api_key,
         http_client=http_client,
         max_retries=DEFAULT_MAX_RETRIES,
@@ -146,7 +143,7 @@ def build_router(
         scribe=scribe,
         approval_gate=approval_gate,
         max_retries=DEFAULT_MAX_RETRIES,
-        backoff_base_seconds=backoff_base_seconds,
+        backoff_base_seconds=DEFAULT_BACKOFF_BASE_SECONDS,
         sleep=sleep,
         async_sleep=async_sleep,
     )

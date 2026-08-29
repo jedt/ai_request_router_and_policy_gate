@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from llm_router.approval import ApprovalRejectedError
 from llm_router.defaults import (
-    DEFAULT_APPROVAL_POLICY_PATH,
     DEFAULT_POLICY,
     DEFAULT_PROVIDERS,
     FAILOVER_TEST_PROVIDERS,
@@ -147,7 +146,6 @@ def main(test_case: int, logs: bool) -> None:
             scribe=Scribe(AUDIT_LOG_PATH),
             sleep=lambda _: None,
             provider_llms=provider_llms,
-            approval_policy_path=DEFAULT_APPROVAL_POLICY_PATH,
         )
         try:
             response = router.query(user_request)
