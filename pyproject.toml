@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.28,<1",
     "llama-index-core>=0.14,<0.15",
     "llama-index-llms-openai>=0.7,<0.8",
+    "openai>=2,<3",
     "pydantic>=2,<3",
     "rich>=14,<15",
 ]

@@ -6,7 +6,7 @@ from llm_router.models import (
     RoutingDecision,
     RoutingPolicy,
 )
-from llm_router.routing import provider_score, select_provider
+from llm_router.routing import provider_score, rank_providers, select_provider
 
 __all__ = [
     "ProviderProfile",
@@ -14,5 +14,6 @@ __all__ = [
     "RoutingDecision",
     "RoutingPolicy",
     "provider_score",
+    "rank_providers",
     "select_provider",
 ]

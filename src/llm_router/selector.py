@@ -16,7 +16,7 @@ from llm_router.models import ProviderProfile, RoutingDecision, RoutingPolicy
 from llm_router.routing import select_provider
 
 
-class SemanticProviderSelector(BaseSelector):
+class LargeModelProviderSelector(BaseSelector):
     """Classify query requirements and select the best provider tool."""
 
     def __init__(

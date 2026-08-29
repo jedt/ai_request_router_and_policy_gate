@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import time
+from typing import Any, Protocol
 
 from llama_index.core.base.response.schema import Response
 from llama_index.core.query_engine import CustomQueryEngine
-from llama_index.llms.openai import OpenAI
 
 from llm_router.models import ProviderProfile
+
+
+class CompletionProvider(Protocol):
+    def complete(self, prompt: str, **kwargs: Any) -> Any: ...
 
 
 class ProviderQueryEngine(CustomQueryEngine):
     """Execute a query with one provider and attach provider metadata."""
 
-    def __init__(self, llm: OpenAI, provider: ProviderProfile) -> None:
+    def __init__(self, llm: CompletionProvider, provider: ProviderProfile) -> None:
         super().__init__()
         self._llm = llm
         self._provider = provider

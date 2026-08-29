@@ -1173,6 +1173,7 @@ dependencies = [
     { name = "httpx" },
     { name = "llama-index-core" },
     { name = "llama-index-llms-openai" },
+    { name = "openai" },
     { name = "pydantic" },
     { name = "rich" },
 ]
@@ -1190,6 +1191,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "llama-index-core", specifier = ">=0.14,<0.15" },
     { name = "llama-index-llms-openai", specifier = ">=0.7,<0.8" },
+    { name = "openai", specifier = ">=2,<3" },
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "rich", specifier = ">=14,<15" },
 ]

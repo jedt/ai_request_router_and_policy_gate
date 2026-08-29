@@ -36,7 +36,7 @@ class QueryClassifier(Protocol):
     def classify(self, query: str) -> QueryProfile: ...
 
 
-class SemanticQueryClassifier:
+class LLMQueryClassifier:
     """Extract query requirements with an LLM and validate its JSON output."""
 
     def __init__(self, llm: OpenAI) -> None:

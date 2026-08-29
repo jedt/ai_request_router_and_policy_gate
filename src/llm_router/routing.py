@@ -22,6 +22,23 @@ def provider_score(
     )
 
 
+def rank_providers(
+    profile: QueryProfile,
+    providers: Sequence[ProviderProfile],
+    policy: RoutingPolicy,
+) -> tuple[ProviderProfile, ...]:
+    """Rank providers by suitability with a deterministic ID tie breaker."""
+    return tuple(
+        sorted(
+            providers,
+            key=lambda provider: (
+                -provider_score(profile, provider, policy),
+                provider.id,
+            ),
+        )
+    )
+
+
 def select_provider(
     profile: QueryProfile,
     providers: Sequence[ProviderProfile],
@@ -31,10 +48,7 @@ def select_provider(
     if not providers:
         raise ValueError("No providers configured.")
 
-    winner = min(
-        providers,
-        key=lambda provider: (-provider_score(profile, provider, policy), provider.id),
-    )
+    winner = rank_providers(profile, providers, policy)[0]
 
     return RoutingDecision(
         provider=winner,

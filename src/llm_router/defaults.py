@@ -4,6 +4,8 @@ from llm_router.models import ProviderProfile, RoutingPolicy
 
 
 DEFAULT_CLASSIFIER_MODEL = "gpt-4.1-nano"
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BACKOFF_BASE_SECONDS = 1.0
 
 DEFAULT_PROVIDERS: tuple[ProviderProfile, ...] = (
     ProviderProfile(
@@ -33,3 +35,22 @@ DEFAULT_PROVIDERS: tuple[ProviderProfile, ...] = (
 )
 
 DEFAULT_POLICY = RoutingPolicy()
+
+FAILOVER_TEST_PROVIDERS: tuple[ProviderProfile, ...] = (
+    ProviderProfile(
+        id="openai-fast",
+        provider="openai",
+        model="gpt-4o-mini",
+        reasoning_score=0.85,
+        latency_score=0.98,
+        cost_score=0.90,
+    ),
+    ProviderProfile(
+        id="gemini-flash",
+        provider="google",
+        model="gemini-2.5-flash",
+        reasoning_score=0.80,
+        latency_score=0.90,
+        cost_score=0.85,
+    ),
+)
