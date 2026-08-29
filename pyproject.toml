@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-router"
+version = "0.1.0"
+description = "Semantic requirement-based routing for LLM query engines"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.28,<1",
+    "llama-index-core>=0.14,<0.15",
+    "llama-index-llms-openai>=0.7,<0.8",
+    "pydantic>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.19,<2",
+    "pytest>=8,<9",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests", "examples", "main.py"]
