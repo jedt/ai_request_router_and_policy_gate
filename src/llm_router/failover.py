@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 
 import httpx
 from llama_index.core.base.base_query_engine import BaseQueryEngine
@@ -17,6 +18,7 @@ from rich.console import Console
 from llm_router.models import ProviderProfile, RoutingPolicy
 from llm_router.routing import rank_providers
 from llm_router.selector import LargeModelProviderSelector
+from utils.scribe import AuditReceipt, Scribe
 
 
 console = Console(stderr=True)
@@ -24,6 +26,15 @@ console = Console(stderr=True)
 
 class ProviderFailoverError(RuntimeError):
     """Raised after every eligible provider exhausts its retries."""
+
+
+@dataclass(frozen=True)
+class _SelectionContext:
+    selector_result: SelectorResult
+    candidates: tuple[ProviderProfile, ...]
+    request_id: str
+    decision_id: str
+    decision_receipt: AuditReceipt
 
 
 class FailoverRouterQueryEngine(BaseQueryEngine):
@@ -35,6 +46,7 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         query_engine_tools: Sequence[QueryEngineTool],
         providers: tuple[ProviderProfile, ...],
         policy: RoutingPolicy,
+        scribe: Scribe,
         *,
         max_retries: int = 3,
         backoff_base_seconds: float = 1.0,
@@ -64,6 +76,7 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         }
         self._providers = providers
         self._policy = policy
+        self._scribe = scribe
         self._max_retries = max_retries
         self._backoff_base_seconds = backoff_base_seconds
         self._sleep = sleep
@@ -73,31 +86,63 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         return {"selector": self._selector}
 
     def _query(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
-        selector_result, candidates = self._select_candidates(query_bundle)
+        selection = self._select_candidates(query_bundle)
         attempted: list[str] = []
         retry_count = 0
         fallback_reason: str | None = None
         last_error: Exception | None = None
 
-        for provider in candidates:
+        for provider in selection.candidates:
+            if attempted:
+                self._audit(
+                    "fallback_selected",
+                    selection,
+                    {
+                        "from_provider_id": attempted[-1],
+                        "to_provider_id": provider.id,
+                        "reason": fallback_reason,
+                    },
+                )
             attempted.append(provider.id)
             engine = self._tools_by_id[provider.id]
             for attempt in range(self._max_retries + 1):
+                self._audit(
+                    "provider_attempt_started",
+                    selection,
+                    {
+                        "provider_id": provider.id,
+                        "provider": provider.provider,
+                        "model": provider.model,
+                        "attempt_number": attempt + 1,
+                        "is_fallback": len(attempted) > 1,
+                    },
+                )
                 try:
                     response = engine.query(query_bundle)
-                    response = self._add_metadata(
-                        response,
-                        selector_result=selector_result,
-                        attempted=attempted,
-                        retry_count=retry_count,
-                        fallback_reason=fallback_reason,
-                    )
-                    console.log(f"[bold green]Provider response success. provider.id = {provider.id}[/]")
-                    return response
                 except Exception as exc:
                     retryable = _is_retryable(exc)
                     reason = _failure_reason(exc)
+                    self._audit(
+                        "provider_attempt_failed",
+                        selection,
+                        _failure_payload(
+                            provider,
+                            attempt_number=attempt + 1,
+                            exc=exc,
+                            retryable=retryable,
+                            reason=reason,
+                        ),
+                    )
                     if not retryable:
+                        self._audit(
+                            "routing_failed",
+                            selection,
+                            {
+                                "attempted_provider_ids": attempted,
+                                "reason": reason,
+                                "retryable": False,
+                            },
+                        )
                         console.log("[bold red]Provider response failed[/]")
                         raise
                     last_error = exc
@@ -106,70 +151,194 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
                         console.log("[bold red]Provider retries exhausted[/]")
                         break
                     delay = self._backoff_base_seconds * (2**attempt)
+                    self._audit(
+                        "retry_scheduled",
+                        selection,
+                        {
+                            "provider_id": provider.id,
+                            "retry_number": attempt + 1,
+                            "delay_seconds": delay,
+                            "reason": reason,
+                        },
+                    )
                     console.log(f"Provider response failed. retry_count={retry_count}")
                     retry_count += 1
                     self._sleep(delay)
+                else:
+                    response = self._add_metadata(
+                        response,
+                        selector_result=selection.selector_result,
+                        attempted=attempted,
+                        retry_count=retry_count,
+                        fallback_reason=fallback_reason,
+                        decision_receipt=selection.decision_receipt,
+                    )
+                    self._audit(
+                        "provider_attempt_succeeded",
+                        selection,
+                        {
+                            "provider_id": provider.id,
+                            "provider": provider.provider,
+                            "model": provider.model,
+                            "attempt_number": attempt + 1,
+                            "latency_ms": (response.metadata or {}).get("latency_ms"),
+                        },
+                    )
+                    console.log(f"[bold green]Provider response success. provider.id = {provider.id}[/]")
+                    return response
 
         console.log(
             "[bold red]All eligible providers failed[/] "
             f"attempted={attempted!r} reason={fallback_reason!r}"
+        )
+        self._audit(
+            "routing_failed",
+            selection,
+            {
+                "attempted_provider_ids": attempted,
+                "reason": fallback_reason,
+                "retryable": True,
+            },
         )
         raise ProviderFailoverError(
             "All eligible providers failed after retries: " + ", ".join(attempted)
         ) from last_error
 
     async def _aquery(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
-        selector_result, candidates = self._select_candidates(query_bundle)
+        selection = await asyncio.to_thread(self._select_candidates, query_bundle)
         attempted: list[str] = []
         retry_count = 0
         fallback_reason: str | None = None
         last_error: Exception | None = None
 
-        for provider in candidates:
+        for provider in selection.candidates:
+            if attempted:
+                await self._aaudit(
+                    "fallback_selected",
+                    selection,
+                    {
+                        "from_provider_id": attempted[-1],
+                        "to_provider_id": provider.id,
+                        "reason": fallback_reason,
+                    },
+                )
             attempted.append(provider.id)
             engine = self._tools_by_id[provider.id]
             for attempt in range(self._max_retries + 1):
+                await self._aaudit(
+                    "provider_attempt_started",
+                    selection,
+                    {
+                        "provider_id": provider.id,
+                        "provider": provider.provider,
+                        "model": provider.model,
+                        "attempt_number": attempt + 1,
+                        "is_fallback": len(attempted) > 1,
+                    },
+                )
                 try:
                     response = await engine.aquery(query_bundle)
-                    return self._add_metadata(
-                        response,
-                        selector_result=selector_result,
-                        attempted=attempted,
-                        retry_count=retry_count,
-                        fallback_reason=fallback_reason,
-                    )
                 except Exception as exc:
-                    if not _is_retryable(exc):
+                    retryable = _is_retryable(exc)
+                    reason = _failure_reason(exc)
+                    await self._aaudit(
+                        "provider_attempt_failed",
+                        selection,
+                        _failure_payload(
+                            provider,
+                            attempt_number=attempt + 1,
+                            exc=exc,
+                            retryable=retryable,
+                            reason=reason,
+                        ),
+                    )
+                    if not retryable:
+                        await self._aaudit(
+                            "routing_failed",
+                            selection,
+                            {
+                                "attempted_provider_ids": attempted,
+                                "reason": reason,
+                                "retryable": False,
+                            },
+                        )
                         raise
                     last_error = exc
-                    fallback_reason = _failure_reason(exc)
+                    fallback_reason = reason
                     if attempt == self._max_retries:
                         break
                     delay = self._backoff_base_seconds * (2**attempt)
+                    await self._aaudit(
+                        "retry_scheduled",
+                        selection,
+                        {
+                            "provider_id": provider.id,
+                            "retry_number": attempt + 1,
+                            "delay_seconds": delay,
+                            "reason": reason,
+                        },
+                    )
                     retry_count += 1
                     await self._async_sleep(delay)
+                else:
+                    response = self._add_metadata(
+                        response,
+                        selector_result=selection.selector_result,
+                        attempted=attempted,
+                        retry_count=retry_count,
+                        fallback_reason=fallback_reason,
+                        decision_receipt=selection.decision_receipt,
+                    )
+                    await self._aaudit(
+                        "provider_attempt_succeeded",
+                        selection,
+                        {
+                            "provider_id": provider.id,
+                            "provider": provider.provider,
+                            "model": provider.model,
+                            "attempt_number": attempt + 1,
+                            "latency_ms": (response.metadata or {}).get("latency_ms"),
+                        },
+                    )
+                    return response
 
+        await self._aaudit(
+            "routing_failed",
+            selection,
+            {
+                "attempted_provider_ids": attempted,
+                "reason": fallback_reason,
+                "retryable": True,
+            },
+        )
         raise ProviderFailoverError(
             "All eligible providers failed after retries: " + ", ".join(attempted)
         ) from last_error
 
     def _select_candidates(
         self, query_bundle: QueryBundle
-    ) -> tuple[SelectorResult, tuple[ProviderProfile, ...]]:
+    ) -> _SelectionContext:
         tool_metadatas = [
             self._metadata_by_id[provider.id] for provider in self._providers
         ]
-        selector_result = self._selector.select(tool_metadatas, query_bundle)
-        decision = self._selector.last_decision
-        if decision is None:
-            raise RuntimeError("The provider selector did not produce a decision.")
+        audited = self._selector.select_with_decision(
+            tool_metadatas,
+            query_bundle,
+            request_id=self._scribe.new_id(),
+        )
 
-        ranked = rank_providers(decision.profile, self._providers, self._policy)
-        primary = self._providers[selector_result.ind]
+        ranked = rank_providers(audited.decision.profile, self._providers, self._policy)
+        primary = self._providers[audited.selector_result.ind]
         candidates = (primary,) + tuple(
             provider for provider in ranked if provider.id != primary.id
         )
-        return selector_result, candidates
+        return _SelectionContext(
+            selector_result=audited.selector_result,
+            candidates=candidates,
+            request_id=audited.request_id,
+            decision_id=audited.decision_id,
+            decision_receipt=audited.receipt,
+        )
 
     @staticmethod
     def _add_metadata(
@@ -179,15 +348,39 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         attempted: list[str],
         retry_count: int,
         fallback_reason: str | None,
+        decision_receipt: AuditReceipt,
     ) -> RESPONSE_TYPE:
         response.metadata = response.metadata or {}
         response.metadata["selector_result"] = selector_result
         response.metadata["initial_provider_id"] = attempted[0]
         response.metadata["attempted_provider_ids"] = tuple(attempted)
         response.metadata["retry_count"] = retry_count
+        response.metadata["audit_decision_event_id"] = decision_receipt.event_id
+        response.metadata["audit_decision_hash"] = decision_receipt.record_hash
         if fallback_reason is not None:
             response.metadata["fallback_reason"] = fallback_reason
         return response
+
+    def _audit(
+        self,
+        event_type: str,
+        selection: _SelectionContext,
+        payload: dict[str, object],
+    ) -> AuditReceipt:
+        return self._scribe.append(
+            event_type,
+            request_id=selection.request_id,
+            decision_id=selection.decision_id,
+            payload=payload,
+        )
+
+    async def _aaudit(
+        self,
+        event_type: str,
+        selection: _SelectionContext,
+        payload: dict[str, object],
+    ) -> AuditReceipt:
+        return await asyncio.to_thread(self._audit, event_type, selection, payload)
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -208,3 +401,24 @@ def _failure_reason(exc: Exception) -> str:
     if isinstance(status_code, int):
         return f"http_{status_code}"
     return type(exc).__name__
+
+
+def _failure_payload(
+    provider: ProviderProfile,
+    *,
+    attempt_number: int,
+    exc: Exception,
+    retryable: bool,
+    reason: str,
+) -> dict[str, object]:
+    status_code = getattr(exc, "status_code", None)
+    return {
+        "provider_id": provider.id,
+        "provider": provider.provider,
+        "model": provider.model,
+        "attempt_number": attempt_number,
+        "exception_type": type(exc).__name__,
+        "status_code": status_code if isinstance(status_code, int) else None,
+        "reason": reason,
+        "retryable": retryable,
+    }

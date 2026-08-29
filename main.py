@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -24,6 +25,10 @@ from service.mock_api_service_provider import (
     MockGeminiLLM,
     MockOpenAIService,
 )
+from utils.scribe import AuditIntegrityError, AuditRecord, Scribe
+
+
+AUDIT_LOG_PATH = Path("llm-router-audit.db")
 
 
 def select_test_case(test_case: int) -> tuple[str, QueryProfile]:
@@ -42,8 +47,8 @@ def select_test_case(test_case: int) -> tuple[str, QueryProfile]:
                 "Compare REST and GraphQL for a small e-commerce API.",
                 QueryProfile(
                     reasoning_depth=0.50,
-                    latency_sensitivity=0.50,
-                    cost_sensitivity=0.50,
+                    latency_sensitivity=0.60,
+                    cost_sensitivity=0.60,
                 ),
             )
         case 3:
@@ -76,7 +81,16 @@ def select_test_case(test_case: int) -> tuple[str, QueryProfile]:
     show_default=True,
     help="Mock classification test case to run.",
 )
-def main(test_case: int) -> None:
+@click.option(
+    "--logs",
+    is_flag=True,
+    help="Verify and display the tamper-evident audit trail, then exit.",
+)
+def main(test_case: int, logs: bool) -> None:
+    if logs:
+        display_audit_logs()
+        return
+
     user_request, classification_profile = select_test_case(test_case)
     providers = FAILOVER_TEST_PROVIDERS if test_case == 4 else DEFAULT_PROVIDERS
     failing_models = (
@@ -110,6 +124,7 @@ def main(test_case: int) -> None:
             providers=providers,
             policy=DEFAULT_POLICY,
             api_key="fake-key",
+            scribe=Scribe(AUDIT_LOG_PATH),
             sleep=lambda _: None,
             provider_llms=provider_llms,
         )
@@ -141,6 +156,50 @@ def main(test_case: int) -> None:
     table.add_row("Response", str(response))
     table.add_row("Response metadata", str(response.metadata))
     Console().print(table)
+
+
+def display_audit_logs() -> None:
+    try:
+        records = Scribe(AUDIT_LOG_PATH).verify()
+    except AuditIntegrityError as exc:
+        raise click.ClickException(
+            f"Audit integrity verification failed: {exc}"
+        ) from exc
+
+    if not records:
+        click.echo("Audit trail is empty.")
+        return
+
+    table = Table(title="Tamper-Evident Audit Trail", show_lines=True)
+    table.add_column("Sequence", style="bold cyan", no_wrap=True)
+    table.add_column("Field", style="bold")
+    table.add_column("Value", overflow="fold")
+
+    for record in records:
+        for index, (field, value) in enumerate(_audit_record_fields(record)):
+            table.add_row(
+                str(record.sequence) if index == 0 else "",
+                field,
+                value,
+            )
+
+    Console().print(table)
+
+
+def _audit_record_fields(record: AuditRecord) -> tuple[tuple[str, str], ...]:
+    return (
+        ("Timestamp", record.occurred_at),
+        ("Event", record.event_type),
+        ("Event ID", record.event_id),
+        ("Request ID", record.request_id),
+        ("Decision ID", record.decision_id or "-"),
+        (
+            "Payload",
+            json.dumps(record.payload, indent=2, sort_keys=True, ensure_ascii=True),
+        ),
+        ("Previous hash", record.previous_hash),
+        ("Record hash", record.record_hash),
+    )
 
 
 if __name__ == "__main__":
