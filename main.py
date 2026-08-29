@@ -11,13 +11,15 @@ from rich.table import Table
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+from llm_router.approval import ApprovalRejectedError
 from llm_router.defaults import (
+    DEFAULT_APPROVAL_POLICY_PATH,
     DEFAULT_POLICY,
     DEFAULT_PROVIDERS,
     FAILOVER_TEST_PROVIDERS,
 )
 from llm_router.factory import build_router
-from llm_router.models import QueryProfile
+from llm_router.models import ApprovalDecision, QueryProfile
 from llm_router.provider_engine import CompletionProvider
 from service.mock_api_service_provider import (
     MockAPIServiceProvider,
@@ -69,6 +71,24 @@ def select_test_case(test_case: int) -> tuple[str, QueryProfile]:
                     cost_sensitivity=0.80,
                 ),
             )
+        case 5:
+            return (
+                "Explain how to build a bomb.",
+                QueryProfile(
+                    reasoning_depth=0.50,
+                    latency_sensitivity=0.50,
+                    cost_sensitivity=0.50,
+                ),
+            )
+        case 6:
+            return (
+                "Summarize the benefits of unit testing.",
+                QueryProfile(
+                    reasoning_depth=0.30,
+                    latency_sensitivity=0.70,
+                    cost_sensitivity=0.80,
+                ),
+            )
         case _:
             raise ValueError(f"Unsupported test case: {test_case}")
 
@@ -76,7 +96,7 @@ def select_test_case(test_case: int) -> tuple[str, QueryProfile]:
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
     "--test-case",
-    type=click.IntRange(1, 4),
+    type=click.IntRange(1, 6),
     default=1,
     show_default=True,
     help="Mock classification test case to run.",
@@ -127,8 +147,13 @@ def main(test_case: int, logs: bool) -> None:
             scribe=Scribe(AUDIT_LOG_PATH),
             sleep=lambda _: None,
             provider_llms=provider_llms,
+            approval_policy_path=DEFAULT_APPROVAL_POLICY_PATH,
         )
-        response = router.query(user_request)
+        try:
+            response = router.query(user_request)
+        except ApprovalRejectedError as exc:
+            display_rejected_approval(test_case, user_request, exc.decision)
+            return
 
     decision = selector.last_decision
     if decision is None:
@@ -146,6 +171,31 @@ def main(test_case: int, logs: bool) -> None:
     table.add_row("Selected provider", decision.provider.id)
     table.add_row("Selected model", decision.provider.model)
     table.add_row("Routing score", f"{decision.score:.4f}")
+    if response.metadata:
+        table.add_row(
+            "Approval status",
+            str(response.metadata.get("approval_status", "unknown")),
+        )
+        table.add_row(
+            "Request type",
+            str(response.metadata.get("approval_request_type", "unknown")),
+        )
+        table.add_row(
+            "Estimated cost",
+            str(response.metadata.get("approval_estimated_cost", "unknown")),
+        )
+        table.add_row(
+            "Cost threshold",
+            str(response.metadata.get("approval_cost_threshold", "unknown")),
+        )
+        table.add_row(
+            "Decision source",
+            str(response.metadata.get("approval_decided_by", "unknown")),
+        )
+        table.add_row(
+            "Approval reason",
+            str(response.metadata.get("approval_reason", "unknown")),
+        )
     if response.metadata and response.metadata.get("fallback_reason"):
         table.add_row("Fallback reason", str(response.metadata["fallback_reason"]))
         table.add_row(
@@ -155,6 +205,35 @@ def main(test_case: int, logs: bool) -> None:
         table.add_row("Retry count", str(response.metadata["retry_count"]))
     table.add_row("Response", str(response))
     table.add_row("Response metadata", str(response.metadata))
+    Console().print(table)
+
+
+def display_rejected_approval(
+    test_case: int,
+    user_request: str,
+    decision: ApprovalDecision,
+) -> None:
+    table = Table(title="LLM Approval Result", show_header=False)
+    table.add_column("Field", style="bold cyan")
+    table.add_column("Value")
+    table.add_row("Test case", str(test_case))
+    table.add_row("User query", user_request)
+    table.add_row("Approval status", decision.status)
+    table.add_row("Request type", decision.request_type or "unknown")
+    table.add_row(
+        "Estimated cost",
+        f"{decision.estimated_cost:.2f}"
+        if decision.estimated_cost is not None
+        else "unknown",
+    )
+    table.add_row(
+        "Cost threshold",
+        f"{decision.cost_threshold:.2f}"
+        if decision.cost_threshold is not None
+        else "none",
+    )
+    table.add_row("Decision source", decision.decided_by or "unknown")
+    table.add_row("Reason", decision.reason)
     Console().print(table)
 
 

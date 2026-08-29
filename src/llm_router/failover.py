@@ -15,6 +15,7 @@ from llama_index.core.tools import QueryEngineTool
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 from rich.console import Console
 
+from llm_router.approval import ApprovalGate, ApprovedRequest
 from llm_router.models import ProviderProfile, RoutingPolicy
 from llm_router.routing import rank_providers
 from llm_router.selector import LargeModelProviderSelector
@@ -35,6 +36,7 @@ class _SelectionContext:
     request_id: str
     decision_id: str
     decision_receipt: AuditReceipt
+    approval: ApprovedRequest
 
 
 class FailoverRouterQueryEngine(BaseQueryEngine):
@@ -47,6 +49,7 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         providers: tuple[ProviderProfile, ...],
         policy: RoutingPolicy,
         scribe: Scribe,
+        approval_gate: ApprovalGate,
         *,
         max_retries: int = 3,
         backoff_base_seconds: float = 1.0,
@@ -77,6 +80,7 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         self._providers = providers
         self._policy = policy
         self._scribe = scribe
+        self._approval_gate = approval_gate
         self._max_retries = max_retries
         self._backoff_base_seconds = backoff_base_seconds
         self._sleep = sleep
@@ -86,7 +90,9 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         return {"selector": self._selector}
 
     def _query(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
-        selection = self._select_candidates(query_bundle)
+        request_id = self._scribe.new_id()
+        approval = self._approval_gate.evaluate(query_bundle.query_str, request_id)
+        selection = self._select_candidates(query_bundle, request_id, approval)
         attempted: list[str] = []
         retry_count = 0
         fallback_reason: str | None = None
@@ -172,6 +178,7 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
                         retry_count=retry_count,
                         fallback_reason=fallback_reason,
                         decision_receipt=selection.decision_receipt,
+                        approval=selection.approval,
                     )
                     self._audit(
                         "provider_attempt_succeeded",
@@ -205,7 +212,18 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         ) from last_error
 
     async def _aquery(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
-        selection = await asyncio.to_thread(self._select_candidates, query_bundle)
+        request_id = self._scribe.new_id()
+        approval = await asyncio.to_thread(
+            self._approval_gate.evaluate,
+            query_bundle.query_str,
+            request_id,
+        )
+        selection = await asyncio.to_thread(
+            self._select_candidates,
+            query_bundle,
+            request_id,
+            approval,
+        )
         attempted: list[str] = []
         retry_count = 0
         fallback_reason: str | None = None
@@ -288,6 +306,7 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
                         retry_count=retry_count,
                         fallback_reason=fallback_reason,
                         decision_receipt=selection.decision_receipt,
+                        approval=selection.approval,
                     )
                     await self._aaudit(
                         "provider_attempt_succeeded",
@@ -316,7 +335,10 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         ) from last_error
 
     def _select_candidates(
-        self, query_bundle: QueryBundle
+        self,
+        query_bundle: QueryBundle,
+        request_id: str,
+        approval: ApprovedRequest,
     ) -> _SelectionContext:
         tool_metadatas = [
             self._metadata_by_id[provider.id] for provider in self._providers
@@ -324,7 +346,7 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         audited = self._selector.select_with_decision(
             tool_metadatas,
             query_bundle,
-            request_id=self._scribe.new_id(),
+            request_id=request_id,
         )
 
         ranked = rank_providers(audited.decision.profile, self._providers, self._policy)
@@ -338,6 +360,7 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
             request_id=audited.request_id,
             decision_id=audited.decision_id,
             decision_receipt=audited.receipt,
+            approval=approval,
         )
 
     @staticmethod
@@ -349,6 +372,7 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         retry_count: int,
         fallback_reason: str | None,
         decision_receipt: AuditReceipt,
+        approval: ApprovedRequest,
     ) -> RESPONSE_TYPE:
         response.metadata = response.metadata or {}
         response.metadata["selector_result"] = selector_result
@@ -357,6 +381,15 @@ class FailoverRouterQueryEngine(BaseQueryEngine):
         response.metadata["retry_count"] = retry_count
         response.metadata["audit_decision_event_id"] = decision_receipt.event_id
         response.metadata["audit_decision_hash"] = decision_receipt.record_hash
+        response.metadata["approval_decision_id"] = approval.decision.decision_id
+        response.metadata["approval_status"] = approval.decision.status
+        response.metadata["approval_request_type"] = approval.decision.request_type
+        response.metadata["approval_estimated_cost"] = approval.decision.estimated_cost
+        response.metadata["approval_cost_threshold"] = approval.decision.cost_threshold
+        response.metadata["approval_decided_by"] = approval.decision.decided_by
+        response.metadata["approval_reason"] = approval.decision.reason
+        response.metadata["approval_audit_event_id"] = approval.decision_receipt.event_id
+        response.metadata["approval_audit_hash"] = approval.decision_receipt.record_hash
         if fallback_reason is not None:
             response.metadata["fallback_reason"] = fallback_reason
         return response

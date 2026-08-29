@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from llm_router.models import ProviderProfile, RoutingPolicy
 
 
 DEFAULT_CLASSIFIER_MODEL = "gpt-4.1-nano"
+DEFAULT_APPROVAL_POLICY_PATH = Path(__file__).resolve().parents[2] / "approval-policy.json"
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_BACKOFF_BASE_SECONDS = 1.0
 
