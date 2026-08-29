@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "algorithm_version": 1,
+  "approval_rubric": "Approve legitimate, clearly scoped requests. Reject requests that are unsafe, unauthorized, deceptive, or lack sufficient context to execute responsibly.",
+  "review_threshold": 0.35,
+  "reject_threshold": 0.75,
+  "uncertainty_weight": 0.2,
+  "risk_weights": {
+    "personal_info": 0.85,
+    "medical_records": 0.9,
+    "cyber_exploits": 1.0,
+    "illegal_acts": 1.0,
+    "harmful_materials": 1.0
+  }
+}
