@@ -8,14 +8,17 @@ version = "0.1.0"
 description = "Semantic requirement-based routing for LLM query engines"
 requires-python = ">=3.10"
 dependencies = [
+    "click>=8.1,<9",
     "httpx>=0.28,<1",
     "llama-index-core>=0.14,<0.15",
     "llama-index-llms-openai>=0.7,<0.8",
     "pydantic>=2,<3",
+    "rich>=14,<15",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
+    "debugpy>=1.8,<2",
     "mypy>=1.19,<2",
     "pytest>=8,<9",
 ]
@@ -27,9 +30,10 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "tests", "examples", "main.py"]
+files = ["src", "tests", "service", "main.py"]

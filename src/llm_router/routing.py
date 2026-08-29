@@ -15,7 +15,6 @@ def provider_score(
     provider: ProviderProfile,
     policy: RoutingPolicy,
 ) -> float:
-    """Calculate provider suitability from requirements and capability scores."""
     return (
         profile.reasoning_depth * provider.reasoning_score * policy.reasoning_weight
         + profile.latency_sensitivity * provider.latency_score * policy.latency_weight
@@ -28,7 +27,7 @@ def select_provider(
     providers: Sequence[ProviderProfile],
     policy: RoutingPolicy,
 ) -> RoutingDecision:
-    """Select the highest-scoring provider with a deterministic tie-break."""
+
     if not providers:
         raise ValueError("No providers configured.")
 
